@@ -40,19 +40,17 @@ jobs:
         uses: hashicorp/setup-terraform@v3
 
       # -----------------------------
-      # Terraform Init
+      # Terraform Init (ROOT)
       # -----------------------------
       - name: Terraform Init
-        working-directory: environments/dev
         env:
           ARM_USE_OIDC: true
         run: terraform init -input=false
 
       # -----------------------------
-      # Terraform Plan
+      # Terraform Plan (ROOT)
       # -----------------------------
       - name: Terraform Plan
-        working-directory: environments/dev
         env:
           ARM_USE_OIDC: true
         run: |
@@ -63,7 +61,6 @@ jobs:
       # Canonical checksum
       # -----------------------------
       - name: Generate checksum
-        working-directory: environments/dev
         run: |
           jq -cS . plan.json > plan.canonical.json
           sha256sum plan.canonical.json | awk '{print $1}' > checksum.txt
@@ -72,7 +69,6 @@ jobs:
       # Build AI payload
       # -----------------------------
       - name: Build AI Payload
-        working-directory: environments/dev
         run: |
           jq -n \
             --arg repo "${{ github.repository }}" \
