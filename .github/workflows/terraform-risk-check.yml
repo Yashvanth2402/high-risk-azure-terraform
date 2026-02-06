@@ -1,0 +1,147 @@
+name: Terraform AI Risk Check
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+      - develop
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  terraform-risk:
+    runs-on: ubuntu-latest
+
+    steps:
+      # -----------------------------
+      # Checkout
+      # -----------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -----------------------------
+      # Azure Login (OIDC)
+      # -----------------------------
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # -----------------------------
+      # Terraform Setup
+      # -----------------------------
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      # -----------------------------
+      # Terraform Init (ROOT)
+      # -----------------------------
+      - name: Terraform Init
+        env:
+          ARM_USE_OIDC: true
+        run: terraform init -input=false
+
+      # -----------------------------
+      # Terraform Plan (ROOT)
+      # -----------------------------
+      - name: Terraform Plan
+        env:
+          ARM_USE_OIDC: true
+        run: |
+          terraform plan -out=tfplan -input=false
+          terraform show -json tfplan > plan.json
+
+      # -----------------------------
+      # Canonical checksum
+      # -----------------------------
+      - name: Generate checksum
+        run: |
+          jq -cS . plan.json > plan.canonical.json
+          sha256sum plan.canonical.json | awk '{print $1}' > checksum.txt
+
+      # -----------------------------
+      # Build AI payload
+      # -----------------------------
+      - name: Build AI Payload
+        run: |
+          jq -n \
+            --arg repo "${{ github.repository }}" \
+            --arg pr "${{ github.event.pull_request.number }}" \
+            --arg branch "${{ github.head_ref }}" \
+            --arg sha "${{ github.sha }}" \
+            --arg actor "${{ github.actor }}" \
+            --slurpfile plan plan.canonical.json \
+            --rawfile checksum checksum.txt \
+            '{
+              metadata: {
+                repo: $repo,
+                pr_id: $pr,
+                branch: $branch,
+                commit_sha: $sha,
+                triggered_by: $actor
+              },
+              environment: {
+                name: "dev",
+                cloud: "azure"
+              },
+              terraform_plan: $plan[0],
+              checksum: $checksum
+            }' > payload.json
+
+      # -----------------------------
+      # Call AI Risk Platform (OIDC)
+      # -----------------------------
+      - name: Call AI Risk Platform
+        env:
+          AI_ENDPOINT: ${{ secrets.AI_RISK_ENDPOINT }}
+        run: |
+          echo "Calling AI platform..."
+          curl -sS -X POST "$AI_ENDPOINT" \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d @payload.json \
+            -o ai_response.json
+
+          cat ai_response.json
+
+      # -----------------------------
+      # Build PR Comment
+      # -----------------------------
+      - name: Build PR Comment
+        run: |
+          RISK_LEVEL=$(jq -r '.risk_level // "UNKNOWN"' ai_response.json)
+          DECISION=$(jq -r '.decision // "REQUIRE_REVIEW"' ai_response.json)
+          CONFIDENCE=$(jq -r '.confidence // "0.4"' ai_response.json)
+          EXPLANATION=$(jq -r '.explanation // "No explanation returned"' ai_response.json)
+
+          cat <<EOF > pr_comment.md
+          ## 🤖 Autonomous Cloud Change Risk Investigator
+
+          **Environment:** dev  
+          **Risk Level:** $RISK_LEVEL  
+          **Decision:** $DECISION  
+          **Confidence:** $CONFIDENCE  
+
+          ### 🧠 AI Explanation
+          $EXPLANATION
+
+          ---
+          *Generated automatically by the AI Risk Platform*
+          EOF
+
+      # -----------------------------
+      # Post PR Comment
+      # -----------------------------
+      - name: Post PR Comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api \
+            repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+            -f body="$(cat pr_comment.md)"
